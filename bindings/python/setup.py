@@ -6,6 +6,7 @@ import platform
 from warnings import warn
 from setuptools import setup, Extension, find_packages
 import numpy
+import re
 
 IS_WINDOWS = platform.system() == 'Windows'
 
@@ -77,15 +78,45 @@ else:
 
 
 if 'CNTK_LIBRARIES' in os.environ:
-  rt_libs = [strip_path(fn) for fn in os.environ['CNTK_LIBRARIES'].split(';' if IS_WINDOWS else None)]
+  rt_libs_all = [strip_path(fn) for fn in os.environ['CNTK_LIBRARIES'].split(';' if IS_WINDOWS else None)]
 else:
-  rt_libs = [strip_path(fn) for fn in glob(os.path.join(CNTK_LIB_PATH,
+  rt_libs_all = [strip_path(fn) for fn in glob(os.path.join(CNTK_LIB_PATH,
                                                         '*' + libname_rt_ext))]
 
 # copy CNTK_VERSION_BANNER to VERSION file
 version_file = open(os.path.join(os.path.dirname(__file__), "cntk", "VERSION"), 'w')
 version_file.write(os.environ['CNTK_VERSION_BANNER'])
 version_file.close()
+
+# Filtering out undesired libs
+#     We are using REGEX instead of GLOBs to perform accurate deletions
+rt_libs = []
+EXCLUDE_RT_LIBS = []
+EXCLUDE_RT_LIBS_SUFFIX = ""
+if IS_WINDOWS:
+    EXCLUDE_RT_LIBS_SUFFIX = "[0-9_\-\.]*\.dll$" # Match specific DLLs listed below
+    EXCLUDE_RT_LIBS += ["cublas", "cudart", "curand", "cusparse"] # Cuda
+    EXCLUDE_RT_LIBS += ["cudnn"] # CUDNN
+    EXCLUDE_RT_LIBS += ["opencv_world"] # OpenCV
+    EXCLUDE_RT_LIBS += ["mkldnn", "mklml", "libiomp5md"] # MKL + MKL-DNN
+    EXCLUDE_RT_LIBS += ["nvml"] # NVML (Nvidia driver)
+else:
+    EXCLUDE_RT_LIBS_SUFFIX = ".so[0-9\.]*"
+    EXCLUDE_RT_LIBS += ["libcudart", "libcublas", "libcurand", "libcusparse", "libcuda", "libnvidia-ml"] # CUDA
+    EXCLUDE_RT_LIBS += ["libcudnn"] # CUDNN
+    EXCLUDE_RT_LIBS += ["libopencv_core", "libopencv_imgproc", "libopencv_imgcodecs"] # OpenCV
+    EXCLUDE_RT_LIBS += ["libmklml_intel", "libiomp5" "libmkldnn"] # MKL
+    EXCLUDE_RT_LIBS += ["libnccl"] # NCCL
+
+for fn in rt_libs_all:
+    exclude=False
+    for s in EXCLUDE_RT_LIBS:
+        pattern = re.compile("%s%s" % (s, EXCLUDE_RT_LIBS_SUFFIX), re.IGNORECASE)
+        if pattern.match(fn):
+            exclude=True
+            break
+    if not exclude:
+        rt_libs.append(fn)
 
 # copy over the libraries to the cntk base directory so that the rpath is
 # correctly set
@@ -97,11 +128,17 @@ os.mkdir(PROJ_LIB_PATH)
 for fn in rt_libs:
     src_file = lib_path(fn)
     tgt_file = proj_lib_path(fn)
-    shutil.copy(src_file, tgt_file)
+    if IS_WINDOWS:
+        shutil.copy(src_file, tgt_file)
+    else:
+        os.system('strip -s %s -o %s' % (src_file, tgt_file))
 
 if 'CNTK_EXTRA_LIBRARIES' in os.environ:
     for lib in os.environ['CNTK_EXTRA_LIBRARIES'].split():
-        shutil.copy(lib, PROJ_LIB_PATH)
+        if IS_WINDOWS:
+            shutil.copy(lib, PROJ_LIB_PATH)
+        else:
+            os.system('strip -s %s -o %s' % (lib, os.path.join(PROJ_LIB_PATH, lib)))
         rt_libs.append(strip_path(lib))
 
 # For package_data we need to have names relative to the cntk module.
@@ -115,17 +152,17 @@ extra_compile_args = [
 if IS_WINDOWS:
     extra_compile_args += [
         "/EHsc",
-        "/DEBUG",
+        "/DEBUG:NONE",
         "/Zi",
         "/WX"
     ]
-    extra_link_args = ['/DEBUG']
+    extra_link_args = ['/DEBUG:NONE']
     runtime_library_dirs = []
 else:
     extra_compile_args += [
         '--std=c++11',
     ]
-    extra_link_args = []
+    extra_link_args = ['-s']
 
     # Expecting the dependent libs (libcntklibrary-[CNTK_COMPONENT_VERSION].so, etc.) inside
     # site-packages/cntk/libs.
